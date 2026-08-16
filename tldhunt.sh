@@ -82,32 +82,63 @@ fi
 # Function to check domain availability
 check_domain() {
     local domain="$1"
+    local http_code
+
+    # Primary check: RDAP (structured, standardized — far more reliable than whois text parsing)
+    http_code=$(curl -s -o /tmp/rdap_$$_${domain}.json -w "%{http_code}" -L --max-time 8 "https://rdap.org/domain/$domain" 2>/dev/null)
+
+    if [[ "$http_code" == "404" ]]; then
+        echo -e "[${b_green}avail${reset}] $domain"
+        rm -f "/tmp/rdap_$$_${domain}.json"
+        return
+    elif [[ "$http_code" == "200" ]]; then
+        if [[ "$nreg" = false ]]; then
+            local expiry_date
+            expiry_date=$(grep -oE '"eventAction":"expiration"[^}]*"eventDate":"[0-9-]+' "/tmp/rdap_$$_${domain}.json" 2>/dev/null | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+            if [[ -n $expiry_date ]]; then
+                echo -e "[${b_red}taken${reset}] $domain - Exp Date: ${orange}$expiry_date${reset} ${cyan}(RDAP)${reset}"
+            else
+                echo -e "[${b_red}taken${reset}] $domain ${cyan}(RDAP)${reset}"
+            fi
+        fi
+        rm -f "/tmp/rdap_$$_${domain}.json"
+        return
+    fi
+    rm -f "/tmp/rdap_$$_${domain}.json"
+
+    # Fallback: RDAP unavailable/unsupported for this TLD — use whois heuristic, label as unverified
     local whois_output
     whois_output=$(whois "$domain" 2>/dev/null)
     local result
     result=$(echo "$whois_output" | grep -iE "Name Server|nserver|nameservers|status: active")
+    local not_found
+    not_found=$(echo "$whois_output" | grep -iE "No match|NOT FOUND|No Data Found|No entries found|Domain not found|is available for registration|Status: AVAILABLE|Domain Status: No Object Found|query rate|quota exceeded|rate limit")
 
-    if [[ -n $result ]]; then
+    if [[ -n $result && -z $not_found ]]; then
         if [[ "$nreg" = false ]]; then
             local expiry_date
             expiry_date=$(echo "$whois_output" | grep -iE "Expiry Date|Expiration Date|Registry Expiry Date|Expiration Time" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | uniq)
             if [[ -n $expiry_date ]]; then
-                echo -e "[${b_red}taken${reset}] $domain - Exp Date: ${orange}$expiry_date${reset}"
+                echo -e "[${b_red}taken${reset}] $domain - Exp Date: ${orange}$expiry_date${reset} ${bold}(whois, unverified)${reset}"
             else
-                echo -e "[${b_red}taken${reset}] $domain - No expiry date found"
+                echo -e "[${b_red}taken${reset}] $domain - No expiry date found ${bold}(whois, unverified)${reset}"
             fi
         fi
+    elif [[ -z $whois_output ]]; then
+        echo -e "[${orange}?????${reset}] $domain - could not verify (no whois/RDAP response)"
     else
-        echo -e "[${b_green}avail${reset}] $domain"
+        echo -e "[${b_green}avail${reset}] $domain ${bold}(whois, unverified)${reset}"
     fi
 }
 
 # Process TLDs
+MAX_PARALLEL=5
 for ext in "${tlds[@]}"; do
     domain="$keyword$ext"
     check_domain "$domain" &
-    if (( $(jobs -r -p | wc -l) >= 30 )); then
+    if (( $(jobs -r -p | wc -l) >= MAX_PARALLEL )); then
         wait -n
     fi
+    sleep 0.3
 done
 wait
